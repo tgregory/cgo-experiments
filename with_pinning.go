@@ -24,12 +24,15 @@ func NewErrno(code int) *Errno {
 	return &e
 }
 
-var pinMap = make(map[string]Sample)
+// not goroutine safe
+var pinMap = make(map[int]*sample)
+var currentId = 0
 
 type SampleCallback func(sample Sample, number int) error
 type sampleCallback func(number C.int) C.int
 
 type sample struct {
+	id       int
 	sample   unsafe.Pointer
 	callback sampleCallback
 }
@@ -40,21 +43,28 @@ type Sample interface {
 	RegisterCallback(callback SampleCallback) error
 }
 
+// this is not safe in case of multiple goroutines trying to do this at the same time
+// also possibility of overflow exists
 func NewSample(number int) Sample {
 	result := sample{
+		id:     currentId,
 		sample: unsafe.Pointer(C.create_sample(C.int(number))),
 	}
+	currentId++
+	pinMap[result.id] = &result
 	return &result
 }
 
 func (s *sample) Destroy() error {
+	delete(pinMap, s.id)
 	return NewErrno(int(C.destroy_sample(s.sample)))
 }
 
 //export e_callback
 func e_callback(sample unsafe.Pointer, number C.int, data unsafe.Pointer) C.int {
-	f := *(*sampleCallback)(data)
-	return f(number)
+	id := int(uintptr(data))
+	s := pinMap[id]
+	return s.callback(number)
 }
 
 func (s *sample) InvokeCallback() error {
@@ -68,7 +78,7 @@ func (s *sample) RegisterCallback(callback SampleCallback) error {
 		}
 		return 1
 	}
-	return NewErrno(int(C.register_callback(s.sample, (C.SampleCallback)(C.e_callback), unsafe.Pointer(&s.callback))))
+	return NewErrno(int(C.register_callback(s.sample, (C.SampleCallback)(C.e_callback), unsafe.Pointer(uintptr(s.id)))))
 }
 
 func main() {
